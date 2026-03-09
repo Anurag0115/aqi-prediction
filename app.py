@@ -95,6 +95,7 @@ def main():
 
     # Sidebar
     st.sidebar.header("Navigation")
+    st.sidebar.markdown("[📦 View on GitHub](https://github.com/Anurag0115/aqi-prediction)")
     page = st.sidebar.radio(
         "Choose a page",
         ["🔮 Predict AQI", "📊 Data Exploration", "🤖 Model Info"],

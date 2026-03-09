@@ -6,10 +6,18 @@ A Streamlit web app for predicting AQI from pollutant readings.
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from pathlib import Path
 
-# Page config
-st.set_page_config(page_title="AQI Prediction", page_icon="🌍", layout="wide")
+# Page config - hide sidebar
+st.set_page_config(page_title="AQI Prediction", page_icon="🌍", layout="wide", initial_sidebar_state="collapsed")
+
+# Hide sidebar
+st.markdown("""
+<style>
+    [data-testid="stSidebar"] {display: none}
+</style>
+""", unsafe_allow_html=True)
 
 # Path to data
 DATA_PATH = Path(__file__).parent / "city_day.csv"
@@ -57,7 +65,7 @@ def prepare_features(df):
 
 
 def train_model(X_train, y_train, X_test, y_test, features):
-    """Train XGBoost model and return model, scaler, metrics."""
+    """Train XGBoost model and return model, scaler."""
     from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
     from xgboost import XGBRegressor
@@ -74,131 +82,145 @@ def train_model(X_train, y_train, X_test, y_test, features):
         random_state=42,
     )
     model.fit(X_train_scaled, y_train)
-    y_pred = model.predict(X_test_scaled)
 
-    mae = mean_absolute_error(y_test, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-    r2 = r2_score(y_test, y_pred)
-
-    return model, scaler, {"MAE": mae, "RMSE": rmse, "R2": r2}
+    return model, scaler
 
 
 def main():
     st.title("🌍 Air Quality Index (AQI) Prediction")
-    st.markdown(
-        "Predict AQI from pollutant measurements (PM2.5, PM10, CO, NO₂, and more)."
-    )
+    st.markdown("Predict AQI from pollutant measurements (PM2.5, PM10, CO, NO₂, and more).")
+    st.markdown("[📦 View on GitHub](https://github.com/Anurag0115/aqi-prediction)")
 
     if not DATA_PATH.exists():
         st.error(f"Dataset not found at `{DATA_PATH}`. Please ensure `city_day.csv` is in the same folder as the app.")
         return
 
-    # Sidebar
-    st.sidebar.header("Navigation")
-    st.sidebar.markdown("[📦 View on GitHub](https://github.com/Anurag0115/aqi-prediction)")
-    page = st.sidebar.radio(
-        "Choose a page",
-        ["🔮 Predict AQI", "📊 Data Exploration", "🤖 Model Info"],
-    )
-
-    # Load data
     df = load_and_preprocess_data()
     X, y, features = prepare_features(df)
 
-    if page == "🔮 Predict AQI":
-        st.header("Predict AQI from Pollutant Values")
-
-        # Load or train model
-        if MODEL_PATH.exists() and SCALER_PATH.exists():
-            import joblib
-            model = joblib.load(MODEL_PATH)
-            scaler = joblib.load(SCALER_PATH)
-            st.cache_data.clear()
-        else:
-            from sklearn.model_selection import train_test_split
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42
-            )
-            with st.spinner("Training model..."):
-                model, scaler, metrics = train_model(
-                    X_train, y_train, X_test, y_test, features
-                )
-            import joblib
-            joblib.dump(model, MODEL_PATH)
-            joblib.dump(scaler, SCALER_PATH)
-
-        # Input sliders (use typical ranges from dataset)
-        defaults = {
-            "PM2.5": 70, "PM10": 120, "NO": 15, "NO2": 25, "NOx": 25,
-            "NH3": 15, "CO": 2, "SO2": 20, "O3": 30, "Benzene": 2,
-            "Toluene": 5, "Xylene": 2,
-        }
-
-        st.subheader("Enter pollutant values (µg/m³)")
-        cols = st.columns(3)
-        values = {}
-        for i, feat in enumerate(features):
-            with cols[i % 3]:
-                val = defaults.get(feat, 10)
-                values[feat] = st.number_input(
-                    feat,
-                    min_value=0.0,
-                    max_value=1000.0,
-                    value=float(val),
-                    step=1.0,
-                    key=feat,
-                )
-
-        if st.button("Predict AQI"):
-            input_row = pd.DataFrame([values])[features]
-            input_scaled = scaler.transform(input_row)
-            pred = model.predict(input_scaled)[0]
-            pred = max(0, pred)  # AQI should be non-negative
-
-            bucket = get_aqi_bucket(pred)
-            st.success(f"**Predicted AQI: {pred:.1f}** — *{bucket}*")
-
-            # Color bar
-            colors = ["#00e400", "#ffff00", "#ff7e00", "#ff0000", "#8f3f97", "#7e0023"]
-            buckets = ["Good", "Satisfactory", "Moderate", "Poor", "Very Poor", "Severe"]
-            idx = min(int(pred / 100) if pred < 500 else 5, 5)
-            st.markdown(
-                f'<div style="padding:10px; border-radius:8px; background:{colors[idx]}; color:black; text-align:center;">'
-                f"Category: {bucket}</div>",
-                unsafe_allow_html=True,
-            )
-
-    elif page == "📊 Data Exploration":
-        st.header("Data Exploration")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Total records", f"{len(df):,}")
-            st.metric("Features", len(features))
-        with col2:
-            st.metric("Mean AQI", f"{y.mean():.1f}")
-            st.metric("Date range", f"{df['Date'].min()} → {df['Date'].max()}")
-
-        st.subheader("Sample data")
-        display_cols = ["City", "Date"] + features[:6] + ["AQI"]
-        display_cols = [c for c in display_cols if c in df.columns]
-        st.dataframe(df[display_cols].head(20).style.background_gradient(subset=["AQI"], cmap="RdYlGn_r"))
-
+    # Load or train model
+    if MODEL_PATH.exists() and SCALER_PATH.exists():
+        import joblib
+        model = joblib.load(MODEL_PATH)
+        scaler = joblib.load(SCALER_PATH)
     else:
-        st.header("Model Info")
-        st.markdown("""
-        - **Model:** XGBoost Regressor  
-        - **Best params:** learning_rate=0.2, max_depth=5, n_estimators=100  
-        - **Metrics:** MAE, RMSE, R²  
-        - **Features:** PM2.5, PM10, NO, NO2, NOx, NH3, CO, SO2, O3, Benzene, Toluene, Xylene  
-        """)
-        if X is not None and len(X) > 0:
-            from sklearn.model_selection import train_test_split
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-            model, scaler, metrics = train_model(X_train, y_train, X_test, y_test, features)
-            st.metric("MAE", f"{metrics['MAE']:.2f}")
-            st.metric("RMSE", f"{metrics['RMSE']:.2f}")
-            st.metric("R² Score", f"{metrics['R2']:.2f}")
+        from sklearn.model_selection import train_test_split
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        with st.spinner("Training model..."):
+            model, scaler = train_model(X_train, y_train, X_test, y_test, features)
+        import joblib
+        joblib.dump(model, MODEL_PATH)
+        joblib.dump(scaler, SCALER_PATH)
+
+    # --- Section 1: Manual prediction ---
+    st.header("Predict AQI")
+
+    defaults = {
+        "PM2.5": 70, "PM10": 120, "NO": 15, "NO2": 25, "NOx": 25,
+        "NH3": 15, "CO": 2, "SO2": 20, "O3": 30, "Benzene": 2,
+        "Toluene": 5, "Xylene": 2,
+    }
+
+    cols = st.columns(3)
+    values = {}
+    for i, feat in enumerate(features):
+        with cols[i % 3]:
+            val = defaults.get(feat, 10)
+            values[feat] = st.number_input(
+                feat,
+                min_value=0.0,
+                max_value=1000.0,
+                value=float(val),
+                step=1.0,
+                key=feat,
+            )
+
+    if st.button("Predict AQI"):
+        input_row = pd.DataFrame([values])[features]
+        input_scaled = scaler.transform(input_row)
+        pred = model.predict(input_scaled)[0]
+        pred = max(0, pred)
+        bucket = get_aqi_bucket(pred)
+        st.success(f"**Predicted AQI: {pred:.1f}** — *{bucket}*")
+        colors = ["#00e400", "#ffff00", "#ff7e00", "#ff0000", "#8f3f97", "#7e0023"]
+        idx = min(int(pred / 100) if pred < 500 else 5, 5)
+        st.markdown(
+            f'<div style="padding:10px; border-radius:8px; background:{colors[idx]}; color:black; text-align:center;">Category: {bucket}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # --- Section 2: Upload dataset & Actual vs Predicted graph ---
+    st.header("Enter Your Dataset")
+
+    st.markdown(
+        "Upload a CSV with pollutant columns. If it includes an **AQI** column, you'll see Actual vs Predicted graph."
+    )
+    st.caption("Required columns: PM2.5, PM10, NO, NO2, NOx, NH3, CO, SO2, O3, Benzene, Toluene, Xylene")
+
+    uploaded_file = st.file_uploader("Choose a CSV file", type=["csv"])
+
+    if uploaded_file is not None:
+        try:
+            user_df = pd.read_csv(uploaded_file)
+
+            missing = [c for c in features if c not in user_df.columns]
+            if missing:
+                st.error(f"Missing required columns: **{', '.join(missing)}**")
+            else:
+                X_user = user_df[features].copy()
+                numeric_cols = X_user.select_dtypes(include=["number"]).columns
+                X_user[numeric_cols] = X_user[numeric_cols].fillna(X_user[numeric_cols].mean())
+                X_user = X_user.fillna(0)
+
+                X_user_scaled = scaler.transform(X_user)
+                predictions = model.predict(X_user_scaled)
+                predictions = np.maximum(predictions, 0)
+
+                has_actual = "AQI" in user_df.columns
+
+                if has_actual:
+                    actual = user_df["AQI"].values
+
+                    # Show max 150 points for a clean, readable graph
+                    max_points = 150
+                    n = min(len(actual), max_points)
+                    x = np.arange(1, n + 1)
+                    actual_plot = actual[:n]
+                    pred_plot = predictions[:n]
+
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    ax.plot(x, actual_plot, label="Actual AQI", color="#2196F3", linewidth=2)
+                    ax.plot(x, pred_plot, label="Predicted AQI", color="#FF9800", linewidth=2)
+                    ax.set_xlabel("Sample", fontsize=11)
+                    ax.set_ylabel("AQI Value", fontsize=11)
+                    ax.set_title("Actual vs Predicted AQI", fontsize=13)
+                    ax.legend(loc="upper right", fontsize=10)
+                    ax.grid(True, alpha=0.3, linestyle="--")
+                    ax.set_xlim(1, n)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+
+                    if len(actual) > max_points:
+                        st.caption(f"Showing first {max_points} of {len(actual)} samples. Download CSV for full results.")
+                else:
+                    result_df = pd.DataFrame({
+                        "Predicted_AQI": np.round(predictions, 1),
+                        "Predicted_Category": [get_aqi_bucket(p) for p in predictions],
+                    })
+                    st.dataframe(result_df, use_container_width=True)
+
+                # Download
+                result_df = pd.DataFrame({
+                    "Predicted_AQI": np.round(predictions, 1),
+                    "Predicted_Category": [get_aqi_bucket(p) for p in predictions],
+                })
+                if has_actual:
+                    result_df["Actual_AQI"] = actual
+                csv = result_df.to_csv(index=False)
+                st.download_button("Download results as CSV", data=csv, file_name="aqi_results.csv", mime="text/csv")
+        except Exception as e:
+            st.error(f"Error reading file: {e}")
 
 
 if __name__ == "__main__":

@@ -21,7 +21,8 @@ st.markdown("""
 
 # Path to data
 DATA_PATH = Path(__file__).parent / "city_day.csv"
-MODEL_PATH = Path(__file__).parent / "aqi_model.pkl"
+MODEL_PATH = Path(__file__).parent / "aqi_model.pkl"  # XGBoost model
+MLP_MODEL_PATH = Path(__file__).parent / "mlp_model.pkl"  # Deep (MLP) model
 SCALER_PATH = Path(__file__).parent / "scaler.pkl"
 
 # AQI bucket mapping
@@ -64,26 +65,42 @@ def prepare_features(df):
     return X, y, features
 
 
-def train_model(X_train, y_train, X_test, y_test, features):
-    """Train XGBoost model and return model, scaler."""
+def train_models(X_train, y_train, X_test, y_test, features):
+    """Train XGBoost + deep MLP models and return both with a shared scaler."""
     from sklearn.preprocessing import StandardScaler
-    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
     from xgboost import XGBRegressor
+    from sklearn.neural_network import MLPRegressor
 
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    model = XGBRegressor(
+    # Gradient-boosted trees
+    xgb_model = XGBRegressor(
         objective="reg:squarederror",
         learning_rate=0.2,
         max_depth=5,
-        n_estimators=100,
+        n_estimators=200,
+        subsample=0.9,
+        colsample_bytree=0.9,
         random_state=42,
     )
-    model.fit(X_train_scaled, y_train)
+    xgb_model.fit(X_train_scaled, y_train)
 
-    return model, scaler
+    # Deep MLP (3 hidden layers) for additional non-linear capacity
+    mlp_model = MLPRegressor(
+        hidden_layer_sizes=(128, 64, 32),
+        activation="relu",
+        solver="adam",
+        learning_rate_init=0.001,
+        max_iter=300,
+        random_state=42,
+        early_stopping=True,
+        n_iter_no_change=10,
+    )
+    mlp_model.fit(X_train_scaled, y_train)
+
+    return xgb_model, mlp_model, scaler
 
 
 def main():
@@ -98,18 +115,27 @@ def main():
     df = load_and_preprocess_data()
     X, y, features = prepare_features(df)
 
-    # Load or train model
-    if MODEL_PATH.exists() and SCALER_PATH.exists():
+    # Load or train models (XGBoost + MLP ensemble)
+    if MODEL_PATH.exists() and MLP_MODEL_PATH.exists() and SCALER_PATH.exists():
         import joblib
-        model = joblib.load(MODEL_PATH)
+
+        xgb_model = joblib.load(MODEL_PATH)
+        mlp_model = joblib.load(MLP_MODEL_PATH)
         scaler = joblib.load(SCALER_PATH)
     else:
         from sklearn.model_selection import train_test_split
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        with st.spinner("Training model..."):
-            model, scaler = train_model(X_train, y_train, X_test, y_test, features)
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+        with st.spinner("Training models (XGBoost + Deep MLP)..."):
+            xgb_model, mlp_model, scaler = train_models(
+                X_train, y_train, X_test, y_test, features
+            )
         import joblib
-        joblib.dump(model, MODEL_PATH)
+
+        joblib.dump(xgb_model, MODEL_PATH)
+        joblib.dump(mlp_model, MLP_MODEL_PATH)
         joblib.dump(scaler, SCALER_PATH)
 
     # --- Section 1: Manual prediction ---
@@ -138,8 +164,10 @@ def main():
     if st.button("Predict AQI"):
         input_row = pd.DataFrame([values])[features]
         input_scaled = scaler.transform(input_row)
-        pred = model.predict(input_scaled)[0]
-        pred = max(0, pred)
+        # Hybrid prediction: average XGBoost and deep MLP outputs
+        pred_xgb = xgb_model.predict(input_scaled)[0]
+        pred_mlp = mlp_model.predict(input_scaled)[0]
+        pred = max(0, (pred_xgb + pred_mlp) / 2.0)
         bucket = get_aqi_bucket(pred)
         st.success(f"**Predicted AQI: {pred:.1f}** — *{bucket}*")
         colors = ["#00e400", "#ffff00", "#ff7e00", "#ff0000", "#8f3f97", "#7e0023"]
@@ -173,8 +201,10 @@ def main():
                 X_user = X_user.fillna(0)
 
                 X_user_scaled = scaler.transform(X_user)
-                predictions = model.predict(X_user_scaled)
-                predictions = np.maximum(predictions, 0)
+                # Hybrid predictions from both models
+                preds_xgb = xgb_model.predict(X_user_scaled)
+                preds_mlp = mlp_model.predict(X_user_scaled)
+                predictions = np.maximum((preds_xgb + preds_mlp) / 2.0, 0)
 
                 has_actual = "AQI" in user_df.columns
 

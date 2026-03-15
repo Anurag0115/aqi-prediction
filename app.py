@@ -22,6 +22,7 @@ st.markdown("""
 # Path to data
 DATA_PATH = Path(__file__).parent / "city_day.csv"
 MODEL_PATH = Path(__file__).parent / "aqi_model.pkl"  # XGBoost model
+RF_MODEL_PATH = Path(__file__).parent / "rf_model.pkl"  # Random Forest model
 MLP_MODEL_PATH = Path(__file__).parent / "mlp_model.pkl"  # Deep (MLP) model
 SCALER_PATH = Path(__file__).parent / "scaler.pkl"
 
@@ -66,26 +67,61 @@ def prepare_features(df):
 
 
 def train_models(X_train, y_train, X_test, y_test, features):
-    """Train XGBoost + deep MLP models and return both with a shared scaler."""
+    """Train tuned XGBoost + RandomForest + deep MLP models and return them with a shared scaler.
+
+    - Uses a StandardScaler fitted on training data only.
+    - Tunes XGBoost with a small RandomizedSearchCV (for better accuracy without huge cost).
+    - Uses an MLP with early stopping as a complementary deep model.
+    """
     from sklearn.preprocessing import StandardScaler
+    from sklearn.model_selection import RandomizedSearchCV
+    from sklearn.ensemble import RandomForestRegressor
     from xgboost import XGBRegressor
     from sklearn.neural_network import MLPRegressor
 
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+    # We keep X_test_scaled for potential future use / evaluation
+    _ = scaler.transform(X_test)
 
-    # Gradient-boosted trees
-    xgb_model = XGBRegressor(
+    # ---------------- XGBoost with light hyperparameter tuning ----------------
+    base_xgb = XGBRegressor(
         objective="reg:squarederror",
-        learning_rate=0.2,
-        max_depth=5,
-        n_estimators=200,
-        subsample=0.9,
-        colsample_bytree=0.9,
+        random_state=42,
+        tree_method="hist",
+    )
+
+    param_dist = {
+        "n_estimators": [150, 200, 250],
+        "max_depth": [3, 4, 5, 6],
+        "learning_rate": [0.05, 0.1, 0.2],
+        "subsample": [0.7, 0.85, 1.0],
+        "colsample_bytree": [0.7, 0.9, 1.0],
+    }
+
+    xgb_search = RandomizedSearchCV(
+        estimator=base_xgb,
+        param_distributions=param_dist,
+        n_iter=10,
+        scoring="neg_mean_absolute_error",
+        cv=3,
+        random_state=42,
+        n_jobs=-1,
+        verbose=0,
+    )
+    xgb_search.fit(X_train_scaled, y_train)
+    xgb_model = xgb_search.best_estimator_
+
+    # ---------------- Random Forest (tree ensemble) ----------------
+    rf_model = RandomForestRegressor(
+        n_estimators=300,
+        max_depth=None,
+        min_samples_split=2,
+        min_samples_leaf=1,
+        n_jobs=-1,
         random_state=42,
     )
-    xgb_model.fit(X_train_scaled, y_train)
+    rf_model.fit(X_train_scaled, y_train)
 
     # Deep MLP (3 hidden layers) for additional non-linear capacity
     mlp_model = MLPRegressor(
@@ -100,7 +136,7 @@ def train_models(X_train, y_train, X_test, y_test, features):
     )
     mlp_model.fit(X_train_scaled, y_train)
 
-    return xgb_model, mlp_model, scaler
+    return xgb_model, rf_model, mlp_model, scaler
 
 
 def main():
@@ -115,11 +151,17 @@ def main():
     df = load_and_preprocess_data()
     X, y, features = prepare_features(df)
 
-    # Load or train models (XGBoost + MLP ensemble)
-    if MODEL_PATH.exists() and MLP_MODEL_PATH.exists() and SCALER_PATH.exists():
+    # Load or train models (XGBoost + RF + MLP ensemble)
+    if (
+        MODEL_PATH.exists()
+        and RF_MODEL_PATH.exists()
+        and MLP_MODEL_PATH.exists()
+        and SCALER_PATH.exists()
+    ):
         import joblib
 
         xgb_model = joblib.load(MODEL_PATH)
+        rf_model = joblib.load(RF_MODEL_PATH)
         mlp_model = joblib.load(MLP_MODEL_PATH)
         scaler = joblib.load(SCALER_PATH)
     else:
@@ -128,13 +170,14 @@ def main():
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=42
         )
-        with st.spinner("Training models (XGBoost + Deep MLP)..."):
-            xgb_model, mlp_model, scaler = train_models(
+        with st.spinner("Training models (XGBoost + Random Forest + Deep MLP)..."):
+            xgb_model, rf_model, mlp_model, scaler = train_models(
                 X_train, y_train, X_test, y_test, features
             )
         import joblib
 
         joblib.dump(xgb_model, MODEL_PATH)
+        joblib.dump(rf_model, RF_MODEL_PATH)
         joblib.dump(mlp_model, MLP_MODEL_PATH)
         joblib.dump(scaler, SCALER_PATH)
 
@@ -164,10 +207,11 @@ def main():
     if st.button("Predict AQI"):
         input_row = pd.DataFrame([values])[features]
         input_scaled = scaler.transform(input_row)
-        # Hybrid prediction: average XGBoost and deep MLP outputs
+        # Hybrid prediction: average XGBoost, Random Forest and deep MLP outputs
         pred_xgb = xgb_model.predict(input_scaled)[0]
+        pred_rf = rf_model.predict(input_scaled)[0]
         pred_mlp = mlp_model.predict(input_scaled)[0]
-        pred = max(0, (pred_xgb + pred_mlp) / 2.0)
+        pred = max(0, (pred_xgb + pred_rf + pred_mlp) / 3.0)
         bucket = get_aqi_bucket(pred)
         st.success(f"**Predicted AQI: {pred:.1f}** — *{bucket}*")
         colors = ["#00e400", "#ffff00", "#ff7e00", "#ff0000", "#8f3f97", "#7e0023"]
@@ -201,10 +245,13 @@ def main():
                 X_user = X_user.fillna(0)
 
                 X_user_scaled = scaler.transform(X_user)
-                # Hybrid predictions from both models
+                # Hybrid predictions from all three models
                 preds_xgb = xgb_model.predict(X_user_scaled)
+                preds_rf = rf_model.predict(X_user_scaled)
                 preds_mlp = mlp_model.predict(X_user_scaled)
-                predictions = np.maximum((preds_xgb + preds_mlp) / 2.0, 0)
+                predictions = np.maximum(
+                    (preds_xgb + preds_rf + preds_mlp) / 3.0, 0
+                )
 
                 has_actual = "AQI" in user_df.columns
 
